@@ -696,6 +696,30 @@ bool Free_Return(bool retval, void* weaver_key, password_data_struct* pwd) {
 	return retval;
 }
 
+// apollon: cache the CE/file-name secret so it can be re-applied after
+// /data is remounted (fscrypt's per-sb keyring dies with the mount).
+static std::map<userid_t, std::string> g_apollon_ce_secrets;
+static void apollon_cache_ce_secret(const userid_t user_id, const std::string& s) {
+	if (!s.empty()) g_apollon_ce_secrets[user_id] = s;
+}
+bool Decrypt_CE_storage(const userid_t user_id, const std::string& secret);
+extern "C" bool Decrypt_Reapply_CE(const userid_t user_id) {
+	auto it = g_apollon_ce_secrets.find(user_id);
+	if (it == g_apollon_ce_secrets.end() || it->second.empty()) return false;
+	return Decrypt_CE_storage(user_id, it->second);
+}
+extern "C" bool Decrypt_Reapply_All_CE() {
+	bool ok = true;
+	for (auto& kv : g_apollon_ce_secrets)
+		if (!Decrypt_CE_storage(kv.first, kv.second)) ok = false;
+	return ok;
+}
+extern "C" void Decrypt_Forget_CE() {
+	for (auto& kv : g_apollon_ce_secrets)
+		if (!kv.second.empty()) memset(&kv.second[0], 0, kv.second.size());
+	g_apollon_ce_secrets.clear();
+}
+
 bool Decrypt_CE_storage(const userid_t user_id, const std::string& secret) {
 	printf("Attempting to unlock user storage\n");
 	int flags = android::os::IVold::STORAGE_FLAG_CE;
@@ -703,6 +727,7 @@ bool Decrypt_CE_storage(const userid_t user_id, const std::string& secret) {
 		printf("fscrypt_unlock_ce_storage returned fail\n");
 		return false;
 	}
+	apollon_cache_ce_secret(user_id, secret);
 	printf("Attempting to prepare user storage\n");
 	if (!fscrypt_prepare_user_storage("", user_id, flags)) {
 		printf("failed to fscrypt_prepare_user_storage\n");
