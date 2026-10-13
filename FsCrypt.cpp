@@ -541,6 +541,16 @@ static bool load_all_de_keys() {
     return true;
 }
 
+// apollon: re-install every on-disk DE key.  This is load_all_de_keys() without
+// fscrypt_init_user0()'s create/overwrite paths, so it can be re-run safely
+// after /data was remounted and the filesystem's fscrypt keyring (which holds
+// the device key and every DE/CE key) was destroyed with the superblock.
+bool fscrypt_reload_de_keys() {
+    LOG(INFO) << "fscrypt_reload_de_keys";
+    if (!IsFbeEnabled()) return true;
+    return load_all_de_keys();
+}
+
 bool fscrypt_initialize_systemwide_keys() {
     LOG(INFO) << "fscrypt_initialize_systemwide_keys";
 

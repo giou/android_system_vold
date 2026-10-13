@@ -696,22 +696,37 @@ bool Free_Return(bool retval, void* weaver_key, password_data_struct* pwd) {
 	return retval;
 }
 
-// apollon: cache the CE/file-name secret so it can be re-applied after
-// /data is remounted (fscrypt's per-sb keyring dies with the mount).
+// apollon: cache the CE/file-name secret so it can be re-applied after /data
+// is remounted (the filesystem's fscrypt keyring dies with the superblock).
 static std::map<userid_t, std::string> g_apollon_ce_secrets;
 static void apollon_cache_ce_secret(const userid_t user_id, const std::string& s) {
 	if (!s.empty()) g_apollon_ce_secrets[user_id] = s;
 }
 bool Decrypt_CE_storage(const userid_t user_id, const std::string& secret);
-extern "C" bool Decrypt_Reapply_CE(const userid_t user_id) {
-	auto it = g_apollon_ce_secrets.find(user_id);
-	if (it == g_apollon_ce_secrets.end() || it->second.empty()) return false;
-	return Decrypt_CE_storage(user_id, it->second);
-}
 extern "C" bool Decrypt_Reapply_All_CE() {
+	if (g_apollon_ce_secrets.empty()) return false;
+
+	// Unmounting /data destroyed the filesystem's fscrypt keyring -- it lives in
+	// the superblock -- taking the device key and every DE/CE key with it, while
+	// vold's in-process state still claims the user is unlocked.  So rebuild the
+	// keyring the way boot does: device key, then the on-disk DE keys, then the
+	// cached CE secrets.  Those keys are re-read from their on-disk blobs (the
+	// device key sits in the plaintext /data/unencrypted and the DE blobs are
+	// wrapped with kEmptyAuthentication), so the user's PIN is not needed here.
+	printf("Reapply: rebuilding fscrypt keyring for %zu user(s)\n", g_apollon_ce_secrets.size());
+	if (!fscrypt_initialize_systemwide_keys())
+		printf("Reapply: fscrypt_initialize_systemwide_keys failed\n");
+	if (!fscrypt_reload_de_keys())
+		printf("Reapply: fscrypt_reload_de_keys failed\n");
+
 	bool ok = true;
-	for (auto& kv : g_apollon_ce_secrets)
+	for (auto& kv : g_apollon_ce_secrets) {
+		// Drop the stale "unlocked" bookkeeping, else fscrypt_unlock_ce_storage()
+		// short-circuits and the key is never re-added to the new superblock.
+		fscrypt_lock_ce_storage(kv.first);
 		if (!Decrypt_CE_storage(kv.first, kv.second)) ok = false;
+	}
+	printf("Reapply: %s\n", ok ? "CE keys restored" : "CE key restore FAILED");
 	return ok;
 }
 extern "C" void Decrypt_Forget_CE() {

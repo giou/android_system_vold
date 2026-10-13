@@ -26,6 +26,9 @@ bool fscrypt_initialize_systemwide_keys();
 
 bool fscrypt_init_user0();
 extern bool fscrypt_init_user0_done;
+// apollon: re-install the on-disk DE keys.  Unlike fscrypt_init_user0() this
+// never creates key material, so it is safe to run after /data was remounted.
+bool fscrypt_reload_de_keys();
 bool fscrypt_create_user_keys(userid_t user_id, bool ephemeral);
 bool fscrypt_destroy_user_keys(userid_t user_id);
 bool fscrypt_set_ce_key_protection(userid_t user_id, const std::string& secret);

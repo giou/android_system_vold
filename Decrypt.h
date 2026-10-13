@@ -38,7 +38,6 @@ namespace keystore {
     int Get_Password_Type(const userid_t user_id, std::string& filename);
     bool Decrypt_DE();
     bool Decrypt_User(const userid_t user_id, const std::string& Password);
-    bool Decrypt_Reapply_CE(const userid_t user_id);
     bool Decrypt_Reapply_All_CE();
     void Decrypt_Forget_CE();
 }
