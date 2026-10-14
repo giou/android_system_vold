@@ -699,10 +699,24 @@ bool Free_Return(bool retval, void* weaver_key, password_data_struct* pwd) {
 // apollon: cache the CE/file-name secret so it can be re-applied after /data
 // is remounted (the filesystem's fscrypt keyring dies with the superblock).
 static std::map<userid_t, std::string> g_apollon_ce_secrets;
-static void apollon_cache_ce_secret(const userid_t user_id, const std::string& s) {
-	if (!s.empty()) g_apollon_ce_secrets[user_id] = s;
+
+bool Decrypt_CE_storage(const userid_t user_id, const std::string& secret) {
+	printf("Attempting to unlock user storage\n");
+	int flags = android::os::IVold::STORAGE_FLAG_CE;
+	if (!fscrypt_unlock_ce_storage(user_id, secret)) {
+		printf("fscrypt_unlock_ce_storage returned fail\n");
+		return false;
+	}
+	if (!secret.empty()) g_apollon_ce_secrets[user_id] = secret;
+	printf("Attempting to prepare user storage\n");
+	if (!fscrypt_prepare_user_storage("", user_id, flags)) {
+		printf("failed to fscrypt_prepare_user_storage\n");
+		return false;
+	}
+	printf("User %i Decrypted Successfully!\n", user_id);
+	return true;
 }
-bool Decrypt_CE_storage(const userid_t user_id, const std::string& secret);
+
 extern "C" bool Decrypt_Reapply_All_CE() {
 	if (g_apollon_ce_secrets.empty()) return false;
 
@@ -733,23 +747,6 @@ extern "C" void Decrypt_Forget_CE() {
 	for (auto& kv : g_apollon_ce_secrets)
 		if (!kv.second.empty()) memset(&kv.second[0], 0, kv.second.size());
 	g_apollon_ce_secrets.clear();
-}
-
-bool Decrypt_CE_storage(const userid_t user_id, const std::string& secret) {
-	printf("Attempting to unlock user storage\n");
-	int flags = android::os::IVold::STORAGE_FLAG_CE;
-	if (!fscrypt_unlock_ce_storage(user_id, secret)) {
-		printf("fscrypt_unlock_ce_storage returned fail\n");
-		return false;
-	}
-	apollon_cache_ce_secret(user_id, secret);
-	printf("Attempting to prepare user storage\n");
-	if (!fscrypt_prepare_user_storage("", user_id, flags)) {
-		printf("failed to fscrypt_prepare_user_storage\n");
-		return false;
-	}
-	printf("User %i Decrypted Successfully!\n", user_id);
-	return true;
 }
 
 // /* Decrypt_User_Synth_Pass is the TWRP C++ equivalent to spBasedDoVerifyCredential
