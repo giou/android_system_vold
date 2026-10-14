@@ -120,9 +120,10 @@ bool retry = true;
 
 // apollon: every key on this device is Keymaster-wrapped, and the recovery stops
 // keystore (the post-decrypt TEE cleanup) - so after /data is remounted nothing
-// can be unwrapped a second time.  Keep the *unwrapped* material that was
-// installed while keystore was still alive, so fscrypt_reinstall_cached_*() can
-// rebuild the keyring without keystore.  Nothing here is written to disk and
+// can be unwrapped or re-exported a second time.  Keep the exact *installed*
+// bytes (post-export, as handed to the kernel) captured while keystore was still
+// alive, so fscrypt_reinstall_cached_*() can rebuild the keyring with a pure
+// installKey ioctl, without keystore.  Nothing here is written to disk and
 // nothing is ever generated: an empty cache means the re-install fails loudly.
 static KeyBuffer s_apollon_device_key;
 static bool s_apollon_device_key_cached = false;
@@ -354,7 +355,8 @@ static bool init_data_file_encryption_options() {
 }
 
 static bool install_storage_key(const std::string& mountpoint, const EncryptionOptions& options,
-                                const KeyBuffer& key, EncryptionPolicy* policy) {
+                                const KeyBuffer& key, EncryptionPolicy* policy,
+                                KeyBuffer* out_installed = nullptr) {
     if (options.version == 0) {
         LOG(ERROR) << "EncryptionOptions not initialized";
         return false;
@@ -366,6 +368,10 @@ static bool install_storage_key(const std::string& mountpoint, const EncryptionO
             return false;
         }
     }
+    // apollon: callers that must re-install after keystore is gone capture the
+    // exact bytes handed to the kernel here - re-exporting later is impossible.
+    if (out_installed)
+        *out_installed = options.use_hw_wrapped_key ? ephemeral_wrapped_key : key;
     return installKey(mountpoint, options, options.use_hw_wrapped_key ? ephemeral_wrapped_key : key,
                       policy);
 }
@@ -541,9 +547,13 @@ static bool load_all_de_keys() {
             if (user_id != 0) continue;
             return false;
         }
-        s_apollon_de_keys[user_id] = de_key;  // apollon: cache the unwrapped key
         EncryptionPolicy de_policy;
-        if (!install_storage_key(DATA_MNT_POINT, s_data_options, de_key, &de_policy)) return false;
+        KeyBuffer installed_de_key;
+        if (!install_storage_key(DATA_MNT_POINT, s_data_options, de_key, &de_policy,
+                                 &installed_de_key))
+            return false;
+        // apollon: cache the installed bytes, not the raw key (see above).
+        s_apollon_de_keys[user_id] = installed_de_key;
         const auto& [existing, is_new] = s_de_policies.insert({user_id, {de_policy, {}}});
         if (!is_new && existing->second.internal != de_policy) {
             LOG(ERROR) << "DE policy for user" << user_id << " changed";
@@ -567,6 +577,7 @@ bool fscrypt_initialize_systemwide_keys() {
     if (!get_volume_file_encryption_options(&options)) return false;
 
     KeyBuffer device_key;
+    KeyBuffer installed_device_key;
 install:
     if (!retrieveOrGenerateKey(device_key_path, device_key_temp, kEmptyAuthentication,
                                makeGen(s_data_options), &device_key))
@@ -574,7 +585,8 @@ install:
 
     // This initializes s_device_policy, which is a global variable so that
     // fscrypt_init_user0() can access it later.
-    if (!install_storage_key(DATA_MNT_POINT, s_data_options, device_key, &s_device_policy)) {
+    if (!install_storage_key(DATA_MNT_POINT, s_data_options, device_key, &s_device_policy,
+                              &installed_device_key)) {
         if (retry) {
             printf("Trying %s wrappedkey\n", options.use_hw_wrapped_key ? "without" : "with");
             GetEntryForMountPoint(&fstab_default, DATA_MNT_POINT)->fs_mgr_flags.wrapped_key =
@@ -584,9 +596,10 @@ install:
         }
         return false;
     }
-    // apollon: the only moment this key can be captured - keystore is stopped
-    // after decryption (see fscrypt_reinstall_cached_device_key()).
-    s_apollon_device_key = device_key;
+    // apollon: the only moment these bytes can be captured - keystore is stopped
+    // after decryption, so the re-apply must install them directly without
+    // re-exporting (see fscrypt_reinstall_cached_device_key()).
+    s_apollon_device_key = installed_device_key;
     s_apollon_device_key_cached = true;
 
     std::string options_string;
@@ -952,9 +965,13 @@ bool fscrypt_unlock_ce_storage(userid_t user_id, const std::string& secret_hex) 
     if (!auth) return false;
     KeyBuffer ce_key;
     if (!read_and_fixate_user_ce_key(user_id, *auth, &ce_key)) return false;
-    s_apollon_ce_keys[user_id] = ce_key;  // apollon: cache the unwrapped key
     EncryptionPolicy ce_policy;
-    if (!install_storage_key(DATA_MNT_POINT, s_data_options, ce_key, &ce_policy)) return false;
+    KeyBuffer installed_ce_key;
+    if (!install_storage_key(DATA_MNT_POINT, s_data_options, ce_key, &ce_policy,
+                             &installed_ce_key))
+        return false;
+    // apollon: cache the installed bytes, not the raw key (see above).
+    s_apollon_ce_keys[user_id] = installed_ce_key;
     s_ce_policies[user_id].internal = ce_policy;
     LOG(INFO) << "Installed CE key for user " << user_id;
     return true;
@@ -968,7 +985,9 @@ bool fscrypt_reinstall_cached_device_key() {
         return false;
     }
     if (!init_data_file_encryption_options()) return false;
-    if (!install_storage_key(DATA_MNT_POINT, s_data_options, s_apollon_device_key, &s_device_policy)) {
+    // apollon: install the cached bytes directly - install_storage_key would
+    // re-export via the (stopped) keystore, while installKey is a pure ioctl.
+    if (!installKey(DATA_MNT_POINT, s_data_options, s_apollon_device_key, &s_device_policy)) {
         LOG(ERROR) << "apollon: failed to re-install the cached device key";
         return false;
     }
@@ -981,7 +1000,8 @@ bool fscrypt_reinstall_cached_user_keys() {
     bool ok = true;
     for (const auto& [user_id, de_key] : s_apollon_de_keys) {
         EncryptionPolicy de_policy;
-        if (!install_storage_key(DATA_MNT_POINT, s_data_options, de_key, &de_policy)) {
+        // apollon: direct install, no keystore (see above).
+        if (!installKey(DATA_MNT_POINT, s_data_options, de_key, &de_policy)) {
             LOG(ERROR) << "apollon: failed to re-install the cached DE key for user " << user_id;
             ok = false;
             continue;
@@ -991,7 +1011,8 @@ bool fscrypt_reinstall_cached_user_keys() {
     }
     for (const auto& [user_id, ce_key] : s_apollon_ce_keys) {
         EncryptionPolicy ce_policy;
-        if (!install_storage_key(DATA_MNT_POINT, s_data_options, ce_key, &ce_policy)) {
+        // apollon: direct install, no keystore (see above).
+        if (!installKey(DATA_MNT_POINT, s_data_options, ce_key, &ce_policy)) {
             LOG(ERROR) << "apollon: failed to re-install the cached CE key for user " << user_id;
             ok = false;
             continue;
