@@ -696,10 +696,6 @@ bool Free_Return(bool retval, void* weaver_key, password_data_struct* pwd) {
 	return retval;
 }
 
-// apollon: cache the CE/file-name secret so it can be re-applied after /data
-// is remounted (the filesystem's fscrypt keyring dies with the superblock).
-static std::map<userid_t, std::string> g_apollon_ce_secrets;
-
 bool Decrypt_CE_storage(const userid_t user_id, const std::string& secret) {
 	printf("Attempting to unlock user storage\n");
 	int flags = android::os::IVold::STORAGE_FLAG_CE;
@@ -707,7 +703,6 @@ bool Decrypt_CE_storage(const userid_t user_id, const std::string& secret) {
 		printf("fscrypt_unlock_ce_storage returned fail\n");
 		return false;
 	}
-	if (!secret.empty()) g_apollon_ce_secrets[user_id] = secret;
 	printf("Attempting to prepare user storage\n");
 	if (!fscrypt_prepare_user_storage("", user_id, flags)) {
 		printf("failed to fscrypt_prepare_user_storage\n");
@@ -718,35 +713,24 @@ bool Decrypt_CE_storage(const userid_t user_id, const std::string& secret) {
 }
 
 extern "C" bool Decrypt_Reapply_All_CE() {
-	if (g_apollon_ce_secrets.empty()) return false;
-
 	// Unmounting /data destroyed the filesystem's fscrypt keyring -- it lives in
 	// the superblock -- taking the device key and every DE/CE key with it, while
-	// vold's in-process state still claims the user is unlocked.  So rebuild the
-	// keyring the way boot does: device key, then the on-disk DE keys, then the
-	// cached CE secrets.  Those keys are re-read from their on-disk blobs (the
-	// device key sits in the plaintext /data/unencrypted and the DE blobs are
-	// wrapped with kEmptyAuthentication), so the user's PIN is not needed here.
-	printf("Reapply: rebuilding fscrypt keyring for %zu user(s)\n", g_apollon_ce_secrets.size());
-	if (!fscrypt_initialize_systemwide_keys())
-		printf("Reapply: fscrypt_initialize_systemwide_keys failed\n");
-	if (!fscrypt_reload_de_keys())
-		printf("Reapply: fscrypt_reload_de_keys failed\n");
-
-	bool ok = true;
-	for (auto& kv : g_apollon_ce_secrets) {
-		// Drop the stale "unlocked" bookkeeping, else fscrypt_unlock_ce_storage()
-		// short-circuits and the key is never re-added to the new superblock.
-		fscrypt_lock_ce_storage(kv.first);
-		if (!Decrypt_CE_storage(kv.first, kv.second)) ok = false;
-	}
-	printf("Reapply: %s\n", ok ? "CE keys restored" : "CE key restore FAILED");
-	return ok;
+	// vold's in-process state still claims the user is unlocked.  Every key on
+	// this device is Keymaster-wrapped and the recovery stops keystore after
+	// decryption, so nothing can be unwrapped a second time here: re-install the
+	// material that was captured at decrypt time instead (the FsCrypt caches are
+	// load-only -- no keystore, no generation, no writes).
+	printf("Reapply: rebuilding the fscrypt keyring after /data remount\n");
+	bool device_ok = fscrypt_reinstall_cached_device_key();
+	printf("Reapply: device key %s\n", device_ok ? "re-installed" : "re-install FAILED");
+	bool users_ok = device_ok && fscrypt_reinstall_cached_user_keys();
+	printf("Reapply: DE/CE keys %s\n", users_ok ? "re-installed" : "re-install FAILED");
+	printf("Reapply: %s\n", (device_ok && users_ok) ? "keyring rebuilt" : "keyring rebuild FAILED");
+	return device_ok && users_ok;
 }
 extern "C" void Decrypt_Forget_CE() {
-	for (auto& kv : g_apollon_ce_secrets)
-		if (!kv.second.empty()) memset(&kv.second[0], 0, kv.second.size());
-	g_apollon_ce_secrets.clear();
+	// apollon: /data is being re-keyed - drop the cached raw key material.
+	fscrypt_forget_cached_keys();
 }
 
 // /* Decrypt_User_Synth_Pass is the TWRP C++ equivalent to spBasedDoVerifyCredential
