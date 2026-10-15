@@ -116,17 +116,20 @@ vintf_fragment {
 cc_library_static {
     name: "libvold",
     defaults: [
-        // OrangeFox's bridge from the Make variable TW_USE_FSCRYPT_POLICY to
-        // -DUSE_FSCRYPT_POLICY_V1/V2. Without this, libvold always compiled the
-        // v2 branch while libtar (Make, reading the variable) compiled v1 on
-        // FBEv1 devices, and fscrypt_policy_get_struct() memsets 20 bytes into a
-        // 12-byte buffer. Apollon, diagnosed 2026-10-15.
-        "libaosprecovery_defaults",
+        // fscrypt policy version, set directly. OrangeFox's bridge
+        // (libaosprecovery_defaults in bootable/recovery) is the tidy route, but it
+        // reads TW_USE_FSCRYPT_POLICY from the "twrpVarsPlugin" vendor config, which
+        // nothing in this manifest populates - the variable never arrives, so
+        // libvold compiled the v2 branch while libtar (Make) compiled v1, and
+        // fscrypt_policy_get_struct() memset 24 bytes into the 12-byte struct libtar
+        // allocated. Measured in the shipped libtar.so: fscrypt_policy_struct_size()
+        // returned 0x18. This fork is apollon-only and apollon is FBEv1.
         "vold_default_flags",
         "vold_default_libs",
         "keystore2_use_latest_aidl_ndk_shared",
         "vold_defaults"
     ],
+    cflags: ["-DUSE_FSCRYPT_POLICY_V1"],
     include_dirs: [
         "system/core/gatekeeperd/include"
     ],
