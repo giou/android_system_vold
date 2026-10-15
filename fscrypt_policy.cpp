@@ -196,3 +196,14 @@ extern "C" bool Set_Encryption_Policy(std::string path, struct fscrypt_policy_v2
 }
 #endif
 
+
+// The size this build actually writes into a caller-allocated policy buffer.
+// libtar checks it before every fill, so a split between the two modules fails
+// loud instead of overrunning the heap (v1 = 12 bytes, v2 = 20).
+extern "C" size_t fscrypt_policy_struct_size(void) {
+#ifdef USE_FSCRYPT_POLICY_V1
+    return sizeof(struct fscrypt_policy_v1);
+#else
+    return sizeof(struct fscrypt_policy_v2);
+#endif
+}

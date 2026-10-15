@@ -116,6 +116,12 @@ vintf_fragment {
 cc_library_static {
     name: "libvold",
     defaults: [
+        // OrangeFox's bridge from the Make variable TW_USE_FSCRYPT_POLICY to
+        // -DUSE_FSCRYPT_POLICY_V1/V2. Without this, libvold always compiled the
+        // v2 branch while libtar (Make, reading the variable) compiled v1 on
+        // FBEv1 devices, and fscrypt_policy_get_struct() memsets 20 bytes into a
+        // 12-byte buffer. Apollon, diagnosed 2026-10-15.
+        "libaosprecovery_defaults",
         "vold_default_flags",
         "vold_default_libs",
         "keystore2_use_latest_aidl_ndk_shared",

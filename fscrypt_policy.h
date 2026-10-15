@@ -19,6 +19,7 @@
 
 #include <sys/cdefs.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <cutils/multiuser.h>
 #include <linux/fs.h>
 
@@ -82,6 +83,13 @@ bool fscrypt_policy_set_struct(const char *directory, const struct fscrypt_polic
 #endif
 
 void bytes_to_hex(const uint8_t *bytes, size_t num_bytes, char *hex);
+/* Size of the policy struct this build writes into a caller's buffer. libtar
+ * allocates that buffer itself, so this is the contract between the two halves:
+ * a v1/v2 split (libtar v1, libvold v2) overran a 12-byte struct and corrupted
+ * the heap on encrypted backups - apollon, diagnosed 2026-10-15. The matching
+ * guards are in libtar's append.c and block.c. */
+size_t fscrypt_policy_struct_size(void);
+
 __END_DECLS
 
 #endif // _FS_CRYPT_H_
