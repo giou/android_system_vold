@@ -119,14 +119,18 @@ cc_library_static {
         // Carries -DUSE_FSCRYPT_POLICY_V1 from the twrpVarsPlugin soong config
         // namespace. Without it libvold compiled the v2 fscrypt policy branch while
         // libtar (Make) compiled v1, and fscrypt_policy_get_struct() memset 24 bytes
-        // into the 12-byte struct libtar allocated. The namespace is populated by
-        // the device tree's BoardConfig.mk.
+        // into the 12-byte struct libtar allocated. The namespace is populated
+        // through EXPORT_TO_SOONG (device tree includes orangefox_soong.mk).
         "libaosprecovery_defaults",
         "vold_default_flags",
         "vold_default_libs",
         "keystore2_use_latest_aidl_ndk_shared",
         "vold_defaults"
     ],
+    // Safety net: held until the EXPORT_TO_SOONG route is confirmed in a shipped
+    // artifact by removing this line. Same define either way, so it is inert once
+    // the namespace works, and it is the only guarantee if it does not.
+    cflags: ["-DUSE_FSCRYPT_POLICY_V1"],
     include_dirs: [
         "system/core/gatekeeperd/include"
     ],
