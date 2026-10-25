@@ -735,8 +735,11 @@ extern "C" void Decrypt_Forget_CE() {
 
 // /* Decrypt_User_Synth_Pass is the TWRP C++ equivalent to spBasedDoVerifyCredential
 //  * https://android.googlesource.com/platform/frameworks/base/+/android-8.0.0_r23/services/core/java/com/android/server/locksettings/LockSettingsService.java#1998 */
-bool Decrypt_User_Synth_Pass(const userid_t user_id, const std::string& Password) {
+bool Decrypt_User_Synth_Pass(const userid_t user_id, const std::string& Password,
+                             DecryptResult* result, int* retry_after_ms) {
 	printf("Attempting to decrypt user's synthetic password\n");
+	if (result) *result = DecryptResult::BadCredential;
+	if (retry_after_ms) *retry_after_ms = 0;
 	bool retval = false;
 	void* weaver_key = NULL;
 	password_data_struct pwd;
@@ -861,6 +864,7 @@ bool Decrypt_User_Synth_Pass(const userid_t user_id, const std::string& Password
 
 			if (!aidl_gk_device && !gk_device) {
 				printf("failed to get gatekeeper service\n");
+				if (result) *result = DecryptResult::Retry;
 				return Free_Return(retval, weaver_key, &pwd);
 			}
 
@@ -880,7 +884,8 @@ bool Decrypt_User_Synth_Pass(const userid_t user_id, const std::string& Password
 				android::hardware::hidl_vec<uint8_t> gk_pwd_token_hidl;
 				gk_pwd_token_hidl.setToExternal(const_cast<uint8_t *>((const uint8_t *)gk_pwd_token), SHA512_DIGEST_LENGTH);
 				AidlGatekeeperVerifyResp rsp;
-				auto result = aidl_gk_device->verify(fakeUid(user_id), 0 /* challenge */, pwd_handle_hidl, gk_pwd_token_hidl, &rsp);
+				auto verify_status = aidl_gk_device->verify(fakeUid(user_id), 0 /* challenge */, pwd_handle_hidl, gk_pwd_token_hidl, &rsp);
+				(void)verify_status;
 				free(gk_pwd_token);
 
 				if (rsp.statusCode >= AidlIGatekeeper::STATUS_OK) {
@@ -889,6 +894,8 @@ bool Decrypt_User_Synth_Pass(const userid_t user_id, const std::string& Password
 					gkResponse = GKResponse::ok(authToken2AidlVec(rsp.hardwareAuthToken));
 				} else if (rsp.statusCode == AidlIGatekeeper::ERROR_RETRY_TIMEOUT) {
 					printf("GateKeeper response timeout\n");
+					if (result) *result = DecryptResult::Retry;
+					if (retry_after_ms) *retry_after_ms = rsp.timeoutMs;
 					gkResponse = GKResponse::retry(rsp.timeoutMs);
 					return Free_Return(retval, weaver_key, &pwd);
 				} else {
@@ -915,7 +922,7 @@ bool Decrypt_User_Synth_Pass(const userid_t user_id, const std::string& Password
 					gk_device->verify(fakeUid(user_id), 0 /* challenge */,
 									  pwd_handle_hidl,
 									  gk_pwd_token_hidl,
-									  [&gkResponse]
+									  [&gkResponse, result, retry_after_ms]
 										// []
 										(const android::hardware::gatekeeper::V1_0::GatekeeperResponse &rsp) {
 											// ret = static_cast<int>(rsp.code); // propagate errors
@@ -926,9 +933,14 @@ bool Decrypt_User_Synth_Pass(const userid_t user_id, const std::string& Password
 											else {
 												if (rsp.code == android::hardware::gatekeeper::V1_0::GatekeeperStatusCode::ERROR_RETRY_TIMEOUT) {
 													printf("GateKeeper response timeout\n");
+													if (result) *result = DecryptResult::Retry;
+													if (retry_after_ms) *retry_after_ms = rsp.timeout;
 													gkResponse = GKResponse::retry(rsp.timeout);
 												} else {
 													printf("GateKeeper response error\n");
+													// A non-timeout HAL response error is the
+													// transient failure seen on device; retry once.
+													if (result) *result = DecryptResult::Retry;
 													gkResponse = GKResponse::error();
 												}
 											}
@@ -937,6 +949,7 @@ bool Decrypt_User_Synth_Pass(const userid_t user_id, const std::string& Password
 				free(gk_pwd_token);
 				if (!hwRet.isOk()) {
 					printf("gatekeeper verification failed\n");
+					if (result) *result = DecryptResult::Retry;
 					return Free_Return(retval, weaver_key, &pwd);
 				}
 			}
@@ -980,6 +993,7 @@ bool Decrypt_User_Synth_Pass(const userid_t user_id, const std::string& Password
 	}
 
 	retval = true;
+	if (result) *result = DecryptResult::Ok;
 	return Free_Return(retval, weaver_key, &pwd);
 }
 
@@ -1037,8 +1051,11 @@ extern "C" int Get_Password_Type(const userid_t user_id, std::string& filename) 
 	return 0;
 }
 
-extern "C" bool Decrypt_User(const userid_t user_id, const std::string& Password) {
+extern "C" bool Decrypt_User(const userid_t user_id, const std::string& Password,
+                            DecryptResult* result, int* retry_after_ms) {
 	printf("Attempting to decrypt user\n");
+	if (result) *result = DecryptResult::BadCredential;
+	if (retry_after_ms) *retry_after_ms = 0;
     uint8_t *auth_token;
     uint32_t auth_token_len;
     int ret;
@@ -1057,13 +1074,14 @@ extern "C" bool Decrypt_User(const userid_t user_id, const std::string& Password
 
 	if (Default_Password) {
 		if (!Decrypt_CE_storage(user_id, "!")) {
-			return Decrypt_User_Synth_Pass(user_id, Password);
+			return Decrypt_User_Synth_Pass(user_id, Password, result, retry_after_ms);
 		}
+		if (result) *result = DecryptResult::Ok;
 		return true;
 	}
 	if (stat("/data/system_de/0/spblob", &st) == 0) {
 		printf("Using synthetic password method\n");
-		return Decrypt_User_Synth_Pass(user_id, Password);
+		return Decrypt_User_Synth_Pass(user_id, Password, result, retry_after_ms);
 	}
 	// printf("password filename is '%s'\n", filename.c_str());
 	if (stat(filename.c_str(), &st) != 0) {
@@ -1079,8 +1097,10 @@ extern "C" bool Decrypt_User(const userid_t user_id, const std::string& Password
 	bool request_reenroll = false;
 	android::sp<android::hardware::gatekeeper::V1_0::IGatekeeper> gk_device;
 	gk_device = ::android::hardware::gatekeeper::V1_0::IGatekeeper::getService();
-	if (gk_device == nullptr)
+	if (gk_device == nullptr) {
+		if (result) *result = DecryptResult::Retry;
 		return false;
+	}
 	android::hardware::hidl_vec<uint8_t> curPwdHandle;
 	curPwdHandle.setToExternal(const_cast<uint8_t *>((const uint8_t *)handle.c_str()), st.st_size);
 	android::hardware::hidl_vec<uint8_t> enteredPwd;
@@ -1111,6 +1131,17 @@ extern "C" bool Decrypt_User(const userid_t user_id, const std::string& Password
 							}
 						 );
 	if (!hwRet.isOk()) {
+		if (result) *result = DecryptResult::Retry;
+		return false;
+	}
+	if (ret > 0) {
+		// Gatekeeper requested a retry; its timeout is in milliseconds.
+		if (result) *result = DecryptResult::Retry;
+		if (retry_after_ms) *retry_after_ms = ret;
+		return false;
+	}
+	if (ret != 0) {
+		// Non-timeout gatekeeper response: treat as a bad credential.
 		return false;
 	}
 
@@ -1125,6 +1156,7 @@ extern "C" bool Decrypt_User(const userid_t user_id, const std::string& Password
 	if (!Decrypt_CE_storage(user_id, secret)) {
 		return false;
 	}
+	if (result) *result = DecryptResult::Ok;
 	return true;
 }
 }

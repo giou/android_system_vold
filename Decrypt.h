@@ -34,10 +34,18 @@ static constexpr int NAMESPACE_LOCKSETTINGS = 103;
 
 namespace android {
 namespace keystore {
+    enum class DecryptResult {
+        Ok,
+        BadCredential,
+        Retry,
+    };
+    // BadCredential must not be retried; Retry is a transient HAL failure and
+    // retry_after_ms carries the HAL-provided delay when available.
     void copySqliteDb();
     int Get_Password_Type(const userid_t user_id, std::string& filename);
     bool Decrypt_DE();
-    bool Decrypt_User(const userid_t user_id, const std::string& Password);
+    bool Decrypt_User(const userid_t user_id, const std::string& Password,
+                      DecryptResult* result = nullptr, int* retry_after_ms = nullptr);
     bool Decrypt_Reapply_All_CE();
     void Decrypt_Forget_CE();
 }
