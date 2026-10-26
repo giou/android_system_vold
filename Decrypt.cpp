@@ -87,6 +87,10 @@ extern "C" {
 #include "Weaver1.h"
 #include "android/os/IVold.h"
 
+// The decrypt entry points below are defined in namespace android, outside
+// the keystore implementation block; keep the public header's enum visible.
+using DecryptResult = ::android::keystore::DecryptResult;
+
 namespace apc = ::aidl::android::security::apc;
 namespace keymint = ::aidl::android::hardware::security::keymint;
 namespace ks2 = ::aidl::android::system::keystore2;
