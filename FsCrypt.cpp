@@ -130,9 +130,12 @@ static bool s_apollon_device_key_cached = false;
 static std::map<userid_t, KeyBuffer> s_apollon_de_keys;
 static std::map<userid_t, KeyBuffer> s_apollon_ce_keys;
 
-static void apollon_wipe_key_buffer(KeyBuffer* key) {
-    std::fill(key->begin(), key->end(), 0);
-    key->clear();
+static void apollon_wipe_key_buffer(KeyBuffer& key) {
+    // clear() alone leaves the bytes in the retained capacity, and std::fill can
+    // be optimised away; memset_explicit cannot.
+    if (!key.empty())
+        memset_explicit(key.data(), 0, key.size());
+    key.clear();
 }
 
 // Returns KeyGeneration suitable for key as described in EncryptionOptions
@@ -997,6 +1000,13 @@ bool fscrypt_reinstall_cached_device_key() {
 
 // apollon: re-install the cached DE and CE keys.
 bool fscrypt_reinstall_cached_user_keys() {
+    if (!init_data_file_encryption_options()) return false;
+    // An empty cache means nothing was captured at decrypt time; returning true
+    // would let the caller log "DE/CE keys re-installed" while nothing happened.
+    if (s_apollon_de_keys.empty() && s_apollon_ce_keys.empty()) {
+        LOG(ERROR) << "apollon: no cached DE/CE keys to re-install";
+        return false;
+    }
     bool ok = true;
     for (const auto& [user_id, de_key] : s_apollon_de_keys) {
         EncryptionPolicy de_policy;
@@ -1025,11 +1035,11 @@ bool fscrypt_reinstall_cached_user_keys() {
 
 // apollon: drop the cached material (Format Data re-keys everything).
 void fscrypt_forget_cached_keys() {
-    apollon_wipe_key_buffer(&s_apollon_device_key);
+    apollon_wipe_key_buffer(s_apollon_device_key);
     s_apollon_device_key_cached = false;
-    for (auto& [user_id, key] : s_apollon_de_keys) apollon_wipe_key_buffer(&key);
+    for (auto& [user_id, key] : s_apollon_de_keys) apollon_wipe_key_buffer(key);
     s_apollon_de_keys.clear();
-    for (auto& [user_id, key] : s_apollon_ce_keys) apollon_wipe_key_buffer(&key);
+    for (auto& [user_id, key] : s_apollon_ce_keys) apollon_wipe_key_buffer(key);
     s_apollon_ce_keys.clear();
 }
 

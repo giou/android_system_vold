@@ -727,7 +727,7 @@ extern "C" bool Decrypt_Reapply_All_CE() {
 	printf("Reapply: rebuilding the fscrypt keyring after /data remount\n");
 	bool device_ok = fscrypt_reinstall_cached_device_key();
 	printf("Reapply: device key %s\n", device_ok ? "re-installed" : "re-install FAILED");
-	bool users_ok = device_ok && fscrypt_reinstall_cached_user_keys();
+	bool users_ok = fscrypt_reinstall_cached_user_keys();
 	printf("Reapply: DE/CE keys %s\n", users_ok ? "re-installed" : "re-install FAILED");
 	printf("Reapply: %s\n", (device_ok && users_ok) ? "keyring rebuilt" : "keyring rebuild FAILED");
 	return device_ok && users_ok;
@@ -889,8 +889,15 @@ bool Decrypt_User_Synth_Pass(const userid_t user_id, const std::string& Password
 				gk_pwd_token_hidl.setToExternal(const_cast<uint8_t *>((const uint8_t *)gk_pwd_token), SHA512_DIGEST_LENGTH);
 				AidlGatekeeperVerifyResp rsp;
 				auto verify_status = aidl_gk_device->verify(fakeUid(user_id), 0 /* challenge */, pwd_handle_hidl, gk_pwd_token_hidl, &rsp);
-				(void)verify_status;
 				free(gk_pwd_token);
+				// A failed binder transaction leaves rsp untouched (statusCode 0,
+				// which reads as STATUS_OK), so check the transport before the
+				// payload or a dead HAL looks like a valid credential.
+				if (!verify_status.isOk()) {
+					printf("gatekeeper AIDL call failed\n");
+					if (result) *result = DecryptResult::Retry;
+					return Free_Return(retval, weaver_key, &pwd);
+				}
 
 				if (rsp.statusCode >= AidlIGatekeeper::STATUS_OK) {
 					// Serialize HardwareAuthToken to a vector as hw_auth_token_t.
@@ -942,8 +949,13 @@ bool Decrypt_User_Synth_Pass(const userid_t user_id, const std::string& Password
 													gkResponse = GKResponse::retry(rsp.timeout);
 												} else {
 													printf("GateKeeper response error\n");
-													// A non-timeout HAL response error is the
-													// transient failure seen on device; retry once.
+													// Measured on apollon: the HIDL HAL returns this
+													// same generic code for a wrong PIN and for the
+													// transient failure seen right after an install,
+													// so it cannot be classified as a bad credential
+													// without losing the retry that rescues the
+													// transient case. The caller retries exactly
+													// once, so a wrong PIN costs one extra call.
 													if (result) *result = DecryptResult::Retry;
 													gkResponse = GKResponse::error();
 												}
@@ -993,6 +1005,9 @@ bool Decrypt_User_Synth_Pass(const userid_t user_id, const std::string& Password
 	}
 
 	if (!Decrypt_CE_storage(user_id, secret)) {
+		// The credential was accepted (the blob unwrapped), so this is a keyring
+		// install failure, not a bad password: do not report BadCredential.
+		if (result) *result = DecryptResult::Retry;
 		return Free_Return(retval, weaver_key, &pwd);
 	}
 
@@ -1060,9 +1075,9 @@ extern "C" bool Decrypt_User(const userid_t user_id, const std::string& Password
 	printf("Attempting to decrypt user\n");
 	if (result) *result = DecryptResult::BadCredential;
 	if (retry_after_ms) *retry_after_ms = 0;
-    uint8_t *auth_token;
-    uint32_t auth_token_len;
-    int ret;
+    uint8_t *auth_token = nullptr;
+    uint32_t auth_token_len = 0;
+    int ret = 0;
 
     struct stat st;
     if (user_id > 9999) {
@@ -1146,6 +1161,13 @@ extern "C" bool Decrypt_User(const userid_t user_id, const std::string& Password
 	}
 	if (ret != 0) {
 		// Non-timeout gatekeeper response: treat as a bad credential.
+		return false;
+	}
+	// The callback may never have run even though the transport was ok; without
+	// an auth token there is nothing to unwrap with, and that is not a bad PIN.
+	if (auth_token == nullptr || auth_token_len == 0) {
+		printf("Gatekeeper returned no auth token\n");
+		if (result) *result = DecryptResult::Retry;
 		return false;
 	}
 
